@@ -1,0 +1,755 @@
+// FurFairy platform data model.
+// Multi-tenant: every shop-owned row carries shopId; access is scoped server-side.
+// Money is stored as integer paise (1 INR = 100 paise) to avoid float errors.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+  // Runtime connection. On Supabase use the TRANSACTION POOLER (port 6543,
+  // pgbouncer=true) so serverless invocations don't exhaust Postgres connections.
+  url      = env("DATABASE_URL")
+  // Migrations need a DIRECT connection (port 5432). Prisma uses this only for
+  // `migrate` / `db push`, never at app runtime.
+  directUrl = env("DIRECT_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Identity & access
+// ─────────────────────────────────────────────────────────────
+
+enum UserType {
+  PLATFORM_ADMIN
+  EMPLOYEE
+  CUSTOMER
+}
+
+model User {
+  id           String   @id @default(cuid())
+  type         UserType
+  email        String?  @unique
+  phone        String?  @unique
+  passwordHash String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  employee     Employee?
+  customer     Customer?
+  refreshTokens RefreshToken[]
+  passwordResets PasswordReset[]
+  auditLogs    AuditLog[]       @relation("AuditActor")
+
+  @@index([type])
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model PasswordReset {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Shops, branches, modules, branding
+// ─────────────────────────────────────────────────────────────
+
+enum ShopStatus {
+  DRAFT            // registration started
+  PENDING_REVIEW   // submitted, awaiting admin verification
+  APPROVED         // verified, activated, publicly visible
+  REJECTED
+  SUSPENDED
+}
+
+model Shop {
+  id            String     @id @default(cuid())
+  name          String
+  slug          String     @unique
+  description   String?
+  status        ShopStatus @default(DRAFT)
+  ownerName     String
+  ownerEmail    String
+  ownerPhone    String
+  gstin         String?
+  rejectionReason String?
+  suspensionReason String?
+  approvedAt    DateTime?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  branches        Branch[]
+  employees       Employee[]
+  roles           Role[]
+  documents       ShopDocument[]
+  shopModules     ShopModule[]
+  branding        ShopBranding?
+  pets            Pet[]
+  customersLink   ShopCustomer[]
+  products        Product[]
+  categories      ProductCategory[]
+  suppliers       Supplier[]
+  boardingPackages BoardingPackage[]
+  boardingUnits   BoardingUnit[]
+  boardingReservations BoardingReservation[]
+  groomingServices GroomingService[]
+  appointments    GroomingAppointment[]
+  auditLogs       AuditLog[]
+
+  @@index([status])
+}
+
+model Branch {
+  id            String   @id @default(cuid())
+  shopId        String
+  shop          Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  name          String
+  addressLine1  String
+  addressLine2  String?
+  city          String
+  state         String
+  pincode       String
+  phone         String?
+  openingHours  Json?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  employees     Employee[]
+  inventory     Inventory[]
+  boardingUnits BoardingUnit[]
+
+  @@index([shopId])
+}
+
+model ShopDocument {
+  id         String   @id @default(cuid())
+  shopId     String
+  shop       Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  docType    String   // e.g. GST_CERT, PAN, VET_LICENSE
+  fileUrl    String
+  verified   Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([shopId])
+}
+
+model ShopBranding {
+  id        String   @id @default(cuid())
+  shopId    String   @unique
+  shop      Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  logoUrl   String?
+  primaryColor String?
+  updatedAt DateTime @updatedAt
+}
+
+// Platform-level catalog of modules a shop can enable.
+model Module {
+  id          String       @id @default(cuid())
+  key         String       @unique // BOARDING, GROOMING, RETAIL, VET, SUPPLIES
+  name        String
+  description String?
+  globallyEnabled Boolean  @default(true)
+  requiresVerification Boolean @default(false)
+  shopModules ShopModule[]
+}
+
+enum ShopModuleStatus {
+  ENABLED
+  PENDING_VERIFICATION
+  DISABLED
+}
+
+model ShopModule {
+  id        String           @id @default(cuid())
+  shopId    String
+  shop      Shop             @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  moduleId  String
+  module    Module           @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  status    ShopModuleStatus @default(ENABLED)
+  createdAt DateTime         @default(now())
+
+  @@unique([shopId, moduleId])
+  @@index([shopId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Employees, roles, permissions
+// ─────────────────────────────────────────────────────────────
+
+model Employee {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  shopId    String
+  shop      Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  branchId  String?
+  branch    Branch?  @relation(fields: [branchId], references: [id])
+  username  String
+  fullName  String
+  roleId    String
+  role      Role     @relation(fields: [roleId], references: [id])
+  // Extra per-employee permission grants beyond the role.
+  extraPermissions String[] @default([])
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  careCompletions CareTaskCompletion[]
+  appointments    GroomingAppointment[] @relation("AppointmentStaff")
+
+  @@unique([shopId, username])
+  @@index([shopId])
+  @@index([branchId])
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  shopId      String
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  key         String   // SHOP_OWNER, MANAGER, CASHIER, ...
+  description String?
+  permissions String[] @default([])
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  employees   Employee[]
+
+  @@unique([shopId, key])
+  @@index([shopId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Customers & pets
+// ─────────────────────────────────────────────────────────────
+
+model Customer {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fullName  String
+  email     String?
+  phone     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  pets        Pet[]
+  addresses   CustomerAddress[]
+  shopLinks   ShopCustomer[]
+  reservations BoardingReservation[]
+  appointments GroomingAppointment[]
+}
+
+// Links a customer to a shop they have transacted with (for shop-scoped views).
+model ShopCustomer {
+  id         String   @id @default(cuid())
+  shopId     String
+  shop       Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@unique([shopId, customerId])
+  @@index([shopId])
+}
+
+model CustomerAddress {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  label      String?
+  line1      String
+  line2      String?
+  city       String
+  state      String
+  pincode    String
+  isDefault  Boolean  @default(false)
+
+  @@index([customerId])
+}
+
+model Pet {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  // Pets are owned by the customer. shopId is nullable: set only when a shop
+  // creates a record on the customer's behalf. Access is still gated by booking.
+  shopId     String?
+  shop       Shop?    @relation(fields: [shopId], references: [id])
+  name       String
+  species    String   // DOG, CAT, ...
+  breed      String?
+  sizeClass  String?  // SMALL, MEDIUM, LARGE
+  birthDate  DateTime?
+  notes      String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  documents    PetDocument[]
+  vaccinations Vaccination[]
+  reservations BoardingReservation[]
+  appointments GroomingAppointment[]
+
+  @@index([customerId])
+}
+
+model PetDocument {
+  id        String   @id @default(cuid())
+  petId     String
+  pet       Pet      @relation(fields: [petId], references: [id], onDelete: Cascade)
+  docType   String
+  fileUrl   String
+  createdAt DateTime @default(now())
+
+  @@index([petId])
+}
+
+model Vaccination {
+  id         String   @id @default(cuid())
+  petId      String
+  pet        Pet      @relation(fields: [petId], references: [id], onDelete: Cascade)
+  name       String
+  givenOn    DateTime
+  dueOn      DateTime?
+  createdAt  DateTime @default(now())
+
+  @@index([petId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Catalog & inventory
+// ─────────────────────────────────────────────────────────────
+
+model ProductCategory {
+  id        String   @id @default(cuid())
+  shopId    String
+  shop      Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  name      String
+  parentId  String?
+  parent    ProductCategory?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children  ProductCategory[] @relation("CategoryTree")
+
+  products  Product[]
+
+  @@index([shopId])
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  shopId      String
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  categoryId  String?
+  category    ProductCategory? @relation(fields: [categoryId], references: [id])
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  variants    ProductVariant[]
+  images      ProductImage[]
+
+  @@index([shopId])
+}
+
+model ProductImage {
+  id        String  @id @default(cuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  url       String
+  position  Int     @default(0)
+
+  @@index([productId])
+}
+
+model ProductVariant {
+  id          String   @id @default(cuid())
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  sku         String
+  packSize    String?  // e.g. "1kg", "500g"
+  attributes  Json?
+  // Prices in paise.
+  pricePaise  Int
+  mrpPaise    Int?
+  costPaise   Int?     // for profit/valuation
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  inventory   Inventory[]
+  batches     StockBatch[]
+  movements   StockMovement[]
+  reservations StockReservation[]
+
+  @@unique([productId, sku])
+  @@index([productId])
+}
+
+model Inventory {
+  id         String   @id @default(cuid())
+  variantId  String
+  variant    ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  branchId   String
+  branch     Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  // On-hand quantity. Available = quantity - reserved.
+  quantity   Int      @default(0)
+  reserved   Int      @default(0)
+  lowStockThreshold Int @default(0)
+  updatedAt  DateTime @updatedAt
+
+  @@unique([variantId, branchId])
+  @@index([branchId])
+}
+
+model StockBatch {
+  id         String   @id @default(cuid())
+  variantId  String
+  variant    ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  batchNo    String
+  expiryDate DateTime?
+  quantity   Int
+  costPaise  Int?
+  createdAt  DateTime @default(now())
+
+  @@index([variantId])
+}
+
+enum StockMovementType {
+  RECEIPT
+  SALE
+  ADJUSTMENT
+  RETURN
+  DAMAGE
+  EXPIRY
+}
+
+model StockMovement {
+  id         String   @id @default(cuid())
+  variantId  String
+  variant    ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  branchId   String
+  type       StockMovementType
+  quantity   Int      // signed: + inbound, - outbound
+  reason     String?
+  reference  String?  // order id, receipt id, etc.
+  createdAt  DateTime @default(now())
+
+  @@index([variantId])
+  @@index([branchId])
+}
+
+model StockReservation {
+  id         String   @id @default(cuid())
+  variantId  String
+  variant    ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  branchId   String
+  quantity   Int
+  reference  String   // cart/order id
+  releasedAt DateTime?
+  createdAt  DateTime @default(now())
+
+  @@index([variantId])
+  @@index([reference])
+}
+
+model Supplier {
+  id        String   @id @default(cuid())
+  shopId    String
+  shop      Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  name      String
+  phone     String?
+  email     String?
+  gstin     String?
+  createdAt DateTime @default(now())
+
+  receipts  StockReceipt[]
+
+  @@index([shopId])
+}
+
+model StockReceipt {
+  id         String   @id @default(cuid())
+  shopId     String
+  supplierId String?
+  supplier   Supplier? @relation(fields: [supplierId], references: [id])
+  branchId   String
+  reference  String?
+  totalPaise Int       @default(0)
+  createdAt  DateTime  @default(now())
+
+  items      StockReceiptItem[]
+
+  @@index([shopId])
+}
+
+model StockReceiptItem {
+  id         String   @id @default(cuid())
+  receiptId  String
+  receipt    StockReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  variantId  String
+  quantity   Int
+  costPaise  Int
+  batchNo    String?
+  expiryDate DateTime?
+
+  @@index([receiptId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Boarding
+// ─────────────────────────────────────────────────────────────
+
+enum BoardingTier {
+  BRONZE
+  SILVER
+  GOLD
+  PLATINUM
+}
+
+enum BoardingPackageStatus {
+  DRAFT
+  COMING_SOON
+  ACTIVE
+  TEMPORARILY_UNAVAILABLE
+  DISABLED
+}
+
+model BoardingPackage {
+  id          String       @id @default(cuid())
+  shopId      String
+  shop        Shop         @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  tier        BoardingTier
+  name        String
+  description String?
+  status      BoardingPackageStatus @default(DRAFT)
+  // Shop-configurable inclusions; nothing is hard-coded platform-wide.
+  inclusions  Json?        // { foodType, mealFrequency, walks, grooming, addons, ... }
+  pricePerNightPaise Int   @default(0)
+  capacity    Int          @default(0)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  reservations BoardingReservation[]
+
+  @@unique([shopId, tier])
+  @@index([shopId])
+}
+
+model BoardingUnit {
+  id        String   @id @default(cuid())
+  shopId    String
+  shop      Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  branchId  String?
+  branch    Branch?  @relation(fields: [branchId], references: [id])
+  name      String   // "Kennel 1"
+  unitType  String   @default("KENNEL")
+  isActive  Boolean  @default(true)
+
+  reservations BoardingReservation[]
+
+  @@index([shopId])
+}
+
+enum TransportType {
+  IN_STORE
+  HOME
+}
+
+enum ReservationStatus {
+  PENDING
+  CONFIRMED
+  CHECKED_IN
+  ACTIVE
+  CHECKED_OUT
+  CANCELLED
+  NO_SHOW
+}
+
+model BoardingReservation {
+  id          String   @id @default(cuid())
+  shopId      String
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  packageId   String
+  package     BoardingPackage @relation(fields: [packageId], references: [id])
+  customerId  String
+  customer    Customer @relation(fields: [customerId], references: [id])
+  petId       String
+  pet         Pet      @relation(fields: [petId], references: [id])
+  unitId      String?
+  unit        BoardingUnit? @relation(fields: [unitId], references: [id])
+  checkIn     DateTime
+  checkOut    DateTime
+  status      ReservationStatus @default(PENDING)
+  transportType TransportType  @default(IN_STORE)
+  transportAddress Json?
+  transportFeePaise Int        @default(0)
+  totalPaise  Int      @default(0)
+  reference   String   @unique
+  // Snapshot of care instructions + policy at booking time.
+  careInstructions Json?
+  policySnapshot   Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  careTasks   CareTask[]
+
+  @@index([shopId])
+  @@index([customerId])
+  @@index([petId])
+}
+
+enum CareTaskType {
+  FEED
+  WALK
+  GROOM
+  MEDICATION
+  OTHER
+}
+
+enum CareTaskStatus {
+  DUE
+  COMPLETED
+  OVERDUE
+  SKIPPED
+}
+
+model CareTask {
+  id            String   @id @default(cuid())
+  reservationId String
+  reservation   BoardingReservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  type          CareTaskType
+  scheduledAt   DateTime
+  status        CareTaskStatus @default(DUE)
+  // Medication/other instructions are copied from recorded data only.
+  instructions  String?
+  createdAt     DateTime @default(now())
+
+  completion    CareTaskCompletion?
+
+  @@index([reservationId])
+  @@index([scheduledAt])
+}
+
+model CareTaskCompletion {
+  id          String   @id @default(cuid())
+  careTaskId  String   @unique
+  careTask    CareTask @relation(fields: [careTaskId], references: [id], onDelete: Cascade)
+  employeeId  String
+  employee    Employee @relation(fields: [employeeId], references: [id])
+  notes       String?
+  completedAt DateTime @default(now())
+}
+
+// ─────────────────────────────────────────────────────────────
+// Grooming
+// ─────────────────────────────────────────────────────────────
+
+model GroomingService {
+  id          String   @id @default(cuid())
+  shopId      String
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  basePricePaise Int
+  durationMinutes Int   @default(60)
+  petType     String?  // DOG, CAT, ANY
+  homeServiceAvailable Boolean @default(false)
+  inStoreAvailable Boolean @default(true)
+  depositPaise Int      @default(0)
+  isActive    Boolean  @default(true)
+  // Breed/size based pricing overrides.
+  pricingRules Json?
+  serviceAreaPincodes String[] @default([])
+  cancellationPolicy  Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  appointments GroomingAppointment[]
+
+  @@index([shopId])
+}
+
+enum AppointmentLocation {
+  IN_STORE
+  HOME
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+model GroomingAppointment {
+  id          String   @id @default(cuid())
+  shopId      String
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  serviceId   String
+  service     GroomingService @relation(fields: [serviceId], references: [id])
+  customerId  String
+  customer    Customer @relation(fields: [customerId], references: [id])
+  petId       String
+  pet         Pet      @relation(fields: [petId], references: [id])
+  staffId     String?
+  staff       Employee? @relation("AppointmentStaff", fields: [staffId], references: [id])
+  location    AppointmentLocation @default(IN_STORE)
+  homeAddress Json?
+  startsAt    DateTime
+  endsAt      DateTime
+  status      AppointmentStatus @default(PENDING)
+  pricePaise  Int      @default(0)
+  depositPaise Int     @default(0)
+  reference   String   @unique
+  notes       String?
+  policySnapshot Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([shopId])
+  @@index([staffId])
+  @@index([startsAt])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Audit log (append-only)
+// ─────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  shopId     String?
+  shop       Shop?    @relation(fields: [shopId], references: [id])
+  actorId    String?
+  actor      User?    @relation("AuditActor", fields: [actorId], references: [id])
+  action     String   // e.g. EMPLOYEE_CREATED, PRICE_CHANGED
+  entityType String
+  entityId   String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([shopId])
+  @@index([actorId])
+  @@index([entityType, entityId])
+}

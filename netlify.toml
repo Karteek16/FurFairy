@@ -1,0 +1,49 @@
+# Netlify deployment for FurFairy
+# - React frontend (web/) is built and served statically
+# - The Fastify API runs as a single bundled Netlify Function (netlify/functions/api.ts)
+# - Postgres is hosted on Supabase (set DATABASE_URL / DIRECT_URL in Netlify env)
+
+[build]
+  # Build the backend (tsc -> dist/), generate Prisma client, then build the frontend.
+  command = "npm run build:netlify"
+  # The compiled React app that Netlify serves.
+  publish = "web/dist"
+  # Where our serverless function lives.
+  functions = "netlify/functions"
+
+[build.environment]
+  NODE_VERSION = "20"
+  # The frontend calls same-origin /api/* (proxied to the function), so no
+  # absolute API base is needed in production.
+  VITE_API_BASE = "/api/v1"
+
+[functions]
+  # esbuild bundles the TS function fast and tree-shakes dependencies.
+  node_bundler = "esbuild"
+  # Prisma ships a native query-engine binary that esbuild must NOT inline.
+  # Keeping these external makes Netlify copy the real packages into the bundle.
+  external_node_modules = ["@prisma/client", ".prisma/client", "prisma"]
+  # Ensure the generated Prisma client + engine are packaged with the function.
+  included_files = ["node_modules/.prisma/client/**", "prisma/schema.prisma"]
+
+# ── Routing ──
+# All API traffic is rewritten to the single Fastify function. Fastify's own
+# /api/v1 prefix and /health route are preserved.
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/health"
+  to = "/.netlify/functions/api/health"
+  status = 200
+  force = true
+
+# SPA fallback — every other path serves the React app so client-side routing
+# (e.g. /admin, /shops/yespaws, /book/...) works on hard refresh.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

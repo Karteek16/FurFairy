@@ -1,0 +1,325 @@
+### FurFairy API — click-to-run request collection
+### Use with the VS Code "REST Client" extension (humao.rest-client).
+### Run requests top to bottom. Variables captured from responses flow downward.
+###
+### Prereqs: docker compose up -d  &&  npm run setup  &&  npm run dev
+### Seeded logins:
+###   platform admin  admin@furfairy.in / ChangeMe!123
+###   shop owner      owner@happytails.local / OwnerPass!123  (shop slug: happy-tails)
+
+@baseUrl = http://localhost:4000/api/v1
+
+# =====================================================================
+# 0. Health
+# =====================================================================
+### Health check (no DB needed for the route itself, but server must run)
+GET http://localhost:4000/health
+
+# =====================================================================
+# 1. Platform admin — review & approve shops
+# =====================================================================
+### Admin login
+# @name adminLogin
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "identifier": "admin@furfairy.in",
+  "password": "ChangeMe!123"
+}
+
+###
+@adminToken = {{adminLogin.response.body.accessToken}}
+
+### List all shops (admin view)
+GET {{baseUrl}}/admin/shops
+Authorization: Bearer {{adminToken}}
+
+### List only shops pending review
+GET {{baseUrl}}/admin/shops?status=PENDING_REVIEW
+Authorization: Bearer {{adminToken}}
+
+# =====================================================================
+# 2. Shop owner — log in to the seeded demo shop (already APPROVED)
+# =====================================================================
+### Shop owner login
+# @name ownerLogin
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "identifier": "owner@happytails.local",
+  "password": "OwnerPass!123"
+}
+
+###
+@ownerToken = {{ownerLogin.response.body.accessToken}}
+
+### Who am I? (shows resolved permissions)
+GET {{baseUrl}}/auth/me
+Authorization: Bearer {{ownerToken}}
+
+### My shop
+GET {{baseUrl}}/my-shop
+Authorization: Bearer {{ownerToken}}
+
+# =====================================================================
+# 3. Boarding — view & configure packages
+#    Note: Gold/Platinum cannot be set ACTIVE in Phase 1 (try it below).
+# =====================================================================
+### List boarding packages (Bronze/Silver ACTIVE, Gold/Platinum COMING_SOON)
+# @name packages
+GET {{baseUrl}}/my-shop/boarding/packages
+Authorization: Bearer {{ownerToken}}
+
+###
+@bronzePackageId = {{packages.response.body.packages.0.id}}
+
+### Update the Bronze package inclusions/price
+PUT {{baseUrl}}/my-shop/boarding/packages
+Authorization: Bearer {{ownerToken}}
+Content-Type: application/json
+
+{
+  "tier": "BRONZE",
+  "name": "Bronze — Basic",
+  "status": "ACTIVE",
+  "pricePerNightPaise": 55000,
+  "capacity": 10,
+  "inclusions": { "foodType": "Shop standard", "mealFrequency": 2, "walks": 1 }
+}
+
+### Try to set GOLD to ACTIVE — should be REJECTED (Phase 1 rule)
+PUT {{baseUrl}}/my-shop/boarding/packages
+Authorization: Bearer {{ownerToken}}
+Content-Type: application/json
+
+{
+  "tier": "GOLD",
+  "name": "Gold",
+  "status": "ACTIVE",
+  "pricePerNightPaise": 120000,
+  "capacity": 4
+}
+
+# =====================================================================
+# 4. Shop owner — create an employee (e.g. a boarding staff member)
+# =====================================================================
+### List roles
+GET {{baseUrl}}/my-shop/roles
+Authorization: Bearer {{ownerToken}}
+
+### Create a boarding-staff employee
+POST {{baseUrl}}/my-shop/employees
+Authorization: Bearer {{ownerToken}}
+Content-Type: application/json
+
+{
+  "username": "ravi",
+  "fullName": "Ravi Kumar",
+  "roleKey": "BOARDING_STAFF",
+  "initialPassword": "StaffPass!123"
+}
+
+### Boarding staff login (uses username + shop slug)
+# @name staffLogin
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "identifier": "ravi",
+  "password": "StaffPass!123",
+  "shopSlug": "happy-tails"
+}
+
+###
+@staffToken = {{staffLogin.response.body.accessToken}}
+
+### Staff tries to manage packages — should be FORBIDDEN (no permission)
+GET {{baseUrl}}/my-shop/boarding/packages
+Authorization: Bearer {{staffToken}}
+
+# =====================================================================
+# 5. Catalog & inventory
+# =====================================================================
+### Create a product with one variant
+# @name product
+POST {{baseUrl}}/my-shop/products
+Authorization: Bearer {{ownerToken}}
+Content-Type: application/json
+
+{
+  "name": "Chicken & Rice Dog Food",
+  "description": "Complete adult dog food",
+  "variants": [
+    { "sku": "DOGFOOD-1KG", "packSize": "1kg", "pricePaise": 45000, "mrpPaise": 50000, "costPaise": 30000 }
+  ]
+}
+
+###
+@variantId = {{product.response.body.product.variants.0.id}}
+
+### Get my branches (need a branchId for inventory)
+# @name branches
+GET {{baseUrl}}/my-shop/branches
+Authorization: Bearer {{ownerToken}}
+
+###
+@branchId = {{branches.response.body.branches.0.id}}
+
+### Receive stock into the branch
+POST {{baseUrl}}/my-shop/inventory/receive
+Authorization: Bearer {{ownerToken}}
+Content-Type: application/json
+
+{
+  "branchId": "{{branchId}}",
+  "items": [
+    { "variantId": "{{variantId}}", "quantity": 100, "costPaise": 30000, "batchNo": "B-2026-01", "expiryDate": "2027-01-01T00:00:00.000Z" }
+  ]
+}
+
+### View inventory for the branch
+GET {{baseUrl}}/my-shop/branches/{{branchId}}/inventory
+Authorization: Bearer {{ownerToken}}
+
+# =====================================================================
+# 6. Customer — register, OTP login, create a pet, book a boarding stay
+# =====================================================================
+### Register a customer by email
+POST {{baseUrl}}/customers/register
+Content-Type: application/json
+
+{
+  "fullName": "Anita Sharma",
+  "email": "anita@example.com",
+  "phone": "+919111111111",
+  "password": "CustPass!123"
+}
+
+### Request a sandbox OTP (devOtp is returned in non-production)
+# @name otpReq
+POST {{baseUrl}}/customers/otp/request
+Content-Type: application/json
+
+{ "phone": "+919111111111" }
+
+### Verify OTP -> returns a customer accessToken
+### Copy devOtp from the previous response into "code" below.
+# @name otpVerify
+POST {{baseUrl}}/customers/otp/verify
+Content-Type: application/json
+
+{
+  "phone": "+919111111111",
+  "code": "{{otpReq.response.body.devOtp}}",
+  "fullName": "Anita Sharma"
+}
+
+###
+@custToken = {{otpVerify.response.body.accessToken}}
+
+### Create a pet
+# @name pet
+POST {{baseUrl}}/me/pets
+Authorization: Bearer {{custToken}}
+Content-Type: application/json
+
+{
+  "name": "Bruno",
+  "species": "DOG",
+  "breed": "Labrador",
+  "sizeClass": "LARGE"
+}
+
+###
+@petId = {{pet.response.body.pet.id}}
+
+### Browse the public shop page (no auth needed)
+GET {{baseUrl}}/shops/happy-tails
+
+### Book a boarding stay (Bronze — must be ACTIVE & a Phase-1 tier)
+POST {{baseUrl}}/boarding/reservations
+Authorization: Bearer {{custToken}}
+Content-Type: application/json
+
+{
+  "shopSlug": "happy-tails",
+  "packageId": "{{bronzePackageId}}",
+  "petId": "{{petId}}",
+  "checkIn": "2026-11-01T10:00:00.000Z",
+  "checkOut": "2026-11-04T10:00:00.000Z",
+  "transportType": "IN_STORE"
+}
+
+# =====================================================================
+# 7. Boarding staff — schedule a care task, see the task list, complete it
+# =====================================================================
+### Owner lists reservations to get a reservation id
+# @name reservations
+GET {{baseUrl}}/my-shop/boarding/reservations
+Authorization: Bearer {{ownerToken}}
+
+###
+@reservationId = {{reservations.response.body.reservations.0.id}}
+
+### Confirm the reservation (PENDING -> CONFIRMED)
+PUT {{baseUrl}}/my-shop/boarding/reservations/{{reservationId}}/status
+Authorization: Bearer {{ownerToken}}
+Content-Type: application/json
+
+{ "status": "CONFIRMED" }
+
+### Schedule a feeding care task
+POST {{baseUrl}}/my-shop/boarding/reservations/{{reservationId}}/care-tasks
+Authorization: Bearer {{ownerToken}}
+Content-Type: application/json
+
+{
+  "type": "FEED",
+  "scheduledAt": "2026-11-01T13:00:00.000Z",
+  "instructions": "One cup of kibble, no treats"
+}
+
+### Boarding staff: today's care task list (set ?date=YYYY-MM-DD to match the task)
+# @name careTasks
+GET {{baseUrl}}/my-shop/boarding/care-tasks?date=2026-11-01
+Authorization: Bearer {{staffToken}}
+
+###
+@careTaskId = {{careTasks.response.body.tasks.0.id}}
+
+### Boarding staff: mark the care task complete
+POST {{baseUrl}}/my-shop/boarding/care-tasks/{{careTaskId}}/complete
+Authorization: Bearer {{staffToken}}
+Content-Type: application/json
+
+{ "notes": "Ate well" }
+
+# =====================================================================
+# 8. Grooming — list services and book an appointment
+# =====================================================================
+### List grooming services (seeded "Full Grooming")
+# @name groomServices
+GET {{baseUrl}}/my-shop/grooming/services
+Authorization: Bearer {{ownerToken}}
+
+###
+@serviceId = {{groomServices.response.body.services.0.id}}
+
+### Customer books an in-store grooming appointment
+POST {{baseUrl}}/grooming/appointments
+Authorization: Bearer {{custToken}}
+Content-Type: application/json
+
+{
+  "shopSlug": "happy-tails",
+  "serviceId": "{{serviceId}}",
+  "petId": "{{petId}}",
+  "location": "IN_STORE",
+  "startsAt": "2026-11-05T09:00:00.000Z"
+}
+
+### Owner views the day's appointments
+GET {{baseUrl}}/my-shop/grooming/appointments?date=2026-11-05
+Authorization: Bearer {{ownerToken}}
